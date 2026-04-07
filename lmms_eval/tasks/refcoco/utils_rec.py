@@ -87,6 +87,10 @@ def refcoco_bbox_rec_process_result(doc, result):
     """
     pred = result[0] if len(result) > 0 else ""
     pred = parse_float_sequence_within(pred)
+    # Qwen VL 系列模型输出 0-1000 归一化坐标，需要转换到 [0, 1] 范围
+    if any(v > 1 for v in pred):
+        if all(0 <= v <= 1000 for v in pred):
+            pred = [v / 1000.0 for v in pred]
     ann_id = doc["question_id"]
     data_dict = {"answer": doc["answer"], "pred": pred, "ann_id": ann_id, "bbox": doc["bbox"]}
     return {f"refcoco_{metric}": data_dict for metric in COCO_REC_METRICS}

@@ -109,11 +109,12 @@ def smart_resize_qwen(height: int, width: int, factor: int = 28, min_pixels: int
 
 
 def _normalize_bbox(bbox: List[float], width: int, height: int) -> List[float]:
-    """Normalize bbox from either [0, 1] or [0, 999] range to pixel coordinates."""
+    """Normalize bbox from either [0, 1] or [0, 1000] range to pixel coordinates."""
     if all(coord <= 1 for coord in bbox):
         return [bbox[0] * width, bbox[1] * height, bbox[2] * width, bbox[3] * height]
     else:
-        return [bbox[0] / 999 * width, bbox[1] / 999 * height, bbox[2] / 999 * width, bbox[3] / 999 * height]
+        # Qwen VL 系列模型输出 0-1000 归一化坐标
+        return [bbox[0] / 1000 * width, bbox[1] / 1000 * height, bbox[2] / 1000 * width, bbox[3] / 1000 * height]
 
 
 def convert_bbox_from_mimo(bbox: List[float], width: int, height: int) -> List[float]:

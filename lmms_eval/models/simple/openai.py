@@ -90,6 +90,8 @@ class OpenAICompatible(lmms):
         adaptive_failure_threshold: float = 0.05,
         prefix_aware_queue: bool = True,
         prefix_hash_chars: int = 256,
+        system_prompt: Optional[str] = None,
+        chat_template_kwargs: Optional[str] = None,
         **kwargs,
     ) -> None:
         """
@@ -125,6 +127,22 @@ class OpenAICompatible(lmms):
         )
         self.prefix_aware_queue = parse_bool(prefix_aware_queue)
         self.prefix_hash_chars = max(32, int(prefix_hash_chars))
+        if system_prompt is not None:
+            self.system_prompt = self._resolve_system_prompt(system_prompt)
+        else:
+            self.system_prompt = None
+
+        # 支持 chat_template_kwargs，用于如 Qwen3.5 的 enable_thinking 控制
+        # 可以传入 JSON 字符串（如 '{"enable_thinking": false}'）或逗号分隔的 key=value
+        self.chat_template_kwargs = None
+        if chat_template_kwargs is not None:
+            import json
+
+            try:
+                self.chat_template_kwargs = json.loads(chat_template_kwargs)
+            except (json.JSONDecodeError, TypeError):
+                eval_logger.warning(f"Failed to parse chat_template_kwargs as JSON: {chat_template_kwargs}")
+                self.chat_template_kwargs = None
         # In China mainland, people usually use a VPN client to access international web
         # sites such as Google. Such a client usually configures macOS proxy server
         # settings. openai-python uses a httpx.Client with trust_env set to True. Such a
@@ -152,13 +170,14 @@ class OpenAICompatible(lmms):
             base_url = base_url.rstrip("/")
 
         self.client = (
-            OpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
+            OpenAI(api_key=api_key, base_url=base_url, http_client=http_client, timeout=float(self.timeout))
             if not azure_openai
             else AzureOpenAI(
                 api_key=os.getenv("AZURE_OPENAI_API_KEY"),
                 azure_endpoint=os.getenv("AZURE_OPENAI_API_BASE"),
                 api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
                 http_client=http_client,
+                timeout=float(self.timeout),
             )
         )
 
@@ -440,26 +459,38 @@ class OpenAICompatible(lmms):
                         imgs.append(self.encode_image(visual))
 
             request_gen_kwargs = dict(gen_kwargs)
-            max_new_tokens = min(request_gen_kwargs.get("max_new_tokens", 1024), 4096)
+            max_new_tokens = min(request_gen_kwargs.get("max_new_tokens", 4096), 32768)
             temperature = request_gen_kwargs.get("temperature", 0)
+
+            messages = []
+            if self.system_prompt:
+                messages.append({"role": "system", "content": self.system_prompt})
+            messages.append({"role": "user", "content": []})
 
             payload = {
                 "model": self.model_version,
-                "messages": [{"role": "user", "content": []}],
+                "messages": messages,
                 "max_tokens": max_new_tokens,
                 "temperature": temperature,
             }
-            payload["messages"][0]["content"].append({"type": "text", "text": context})
+
+            # 如果配置了 chat_template_kwargs（如 Qwen3.5 的 enable_thinking），
+            # 通过 extra_body 传递给 vLLM 服务端
+            if self.chat_template_kwargs:
+                payload["extra_body"] = {
+                    "chat_template_kwargs": self.chat_template_kwargs,
+                }
+            payload["messages"][-1]["content"].append({"type": "text", "text": context})
             for img in imgs:
                 if isinstance(img, dict) and "audio_b64" in img:
-                    payload["messages"][0]["content"].append(
+                    payload["messages"][-1]["content"].append(
                         {
                             "type": "input_audio",
                             "input_audio": {"data": img["audio_b64"], "format": img["audio_format"]},
                         }
                     )
                 else:
-                    payload["messages"][0]["content"].append(
+                    payload["messages"][-1]["content"].append(
                         {
                             "type": "image_url",
                             "image_url": {"url": f"data:image/png;base64,{img}"},

@@ -19,7 +19,12 @@ def screenspot_v2_doc_to_visual(doc: Dict[str, Any]) -> List[Any]:
 
 def screenspot_v2_doc_to_text(doc: Dict[str, Any], lmms_eval_specific_kwargs=None) -> str:
     instruction = doc.get("instruction", "")
-    return "Identify the UI element for the instruction and output exactly one click point as [x, y] in normalized coordinates within [0, 1]. " "Do not output a bounding box.\n" f"Instruction: {instruction}"
+    return (
+        "Identify the UI element for the instruction and output exactly one click point as [x, y] in normalized coordinates within [0, 1]. "
+        "Do not output a bounding box. Do not include any explanation or extra text. "
+        "Output only the coordinates in the format [x, y].\n"
+        f"Instruction: {instruction}"
+    )
 
 
 def screenspot_v2_doc_to_messages(doc: Dict[str, Any], lmms_eval_specific_kwargs=None):
@@ -89,7 +94,11 @@ def screenspot_v2_process_results(doc, result):
     gt_bbox = _normalize_bbox_to_xyxy(doc["bbox"], width, height)
 
     if point is not None and (point[0] > 1 or point[1] > 1):
-        point = (point[0] / width, point[1] / height)
+        # 坐标在 (1, 1000] 范围内，始终按 1000 制处理（Qwen VL 系列模型输出 0-1000 归一化坐标）
+        if point[0] <= 1000 and point[1] <= 1000:
+            point = (point[0] / 1000.0, point[1] / 1000.0)
+        else:
+            point = (point[0] / width, point[1] / height)
 
     is_correct = bool(point and _point_in_box(point, gt_bbox))
     data_type = doc.get("data_type", "")

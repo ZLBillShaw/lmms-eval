@@ -22,7 +22,8 @@ def osworld_g_doc_to_text(doc: Dict[str, Any], lmms_eval_specific_kwargs=None) -
     return (
         "Identify the UI target for the instruction and output exactly one click point as [x, y]. "
         "You may use either normalized coordinates in [0, 1] or absolute pixel coordinates. "
-        "If the target does not exist, output [-1, -1].\n"
+        "If the target does not exist, output [-1, -1]. "
+        "Do not include any explanation or extra text. Output only the coordinates in the format [x, y].\n"
         f"Instruction: {instruction}"
     )
 
@@ -68,8 +69,12 @@ def _parse_point(prediction: str) -> Optional[Tuple[float, float]]:
 
 def _to_absolute_point(point_xy: Tuple[float, float], width: int, height: int) -> Tuple[float, float]:
     x, y = point_xy
+    # 如果坐标在 [0, 1] 范围内，认为是归一化坐标，转换为绝对像素坐标
     if 0 <= x <= 1 and 0 <= y <= 1:
         return x * width, y * height
+    # 如果坐标在 (1, 1000] 范围内，始终按 1000 制处理（Qwen VL 系列模型输出 0-1000 归一化坐标）
+    if (x > 1 or y > 1) and x <= 1000 and y <= 1000:
+        return (x / 1000.0) * width, (y / 1000.0) * height
     return x, y
 
 

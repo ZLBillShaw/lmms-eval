@@ -121,7 +121,11 @@ def screenspot_pro_process_results(doc, result):
 
     gt_bbox = _normalize_xyxy(_parse_bbox(doc["bbox"]), width, height)
     if point is not None and (point[0] > 1 or point[1] > 1):
-        point = (point[0] / width, point[1] / height)
+        # 坐标在 (1, 1000] 范围内，始终按 1000 制处理（Qwen VL 系列模型输出 0-1000 归一化坐标）
+        if point[0] <= 1000 and point[1] <= 1000:
+            point = (point[0] / 1000.0, point[1] / 1000.0)
+        else:
+            point = (point[0] / width, point[1] / height)
     is_correct = bool(point and _point_in_box(point, gt_bbox))
     ui_type = str(doc.get("ui_type", doc.get("data_type", ""))).lower()
 

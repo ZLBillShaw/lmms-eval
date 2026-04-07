@@ -50,6 +50,10 @@ def screenspot_rec_process_result(doc, result):
     """
     pred = result[0] if len(result) > 0 else ""
     pred = parse_float_sequence_within(pred)
+    # Qwen VL 系列模型输出 0-1000 归一化坐标，需要转换到 [0, 1] 范围
+    if any(v > 1 for v in pred):
+        if all(0 <= v <= 1000 for v in pred):
+            pred = [v / 1000.0 for v in pred]
     ann_id = doc["file_name"]
     data_dict = {"instruction": doc["instruction"], "pred": pred, "ann_id": ann_id, "bbox": doc["bbox"], "data_type": doc["data_type"], "data_source": doc["data_source"]}
     return {f"screenspot_{metric}": data_dict for metric in REC_METRICS}
