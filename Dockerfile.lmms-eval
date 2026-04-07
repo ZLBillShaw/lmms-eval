@@ -1,0 +1,64 @@
+FROM python:3.11-slim
+
+# 系统级依赖
+#   - git: 从 GitHub 源码安装 lmms-eval
+#   - ffmpeg, libsm6, libxext6: 图像/视频处理
+#   - poppler-utils: mmlongbench_doc 任务需要 (pdf2image 依赖)
+#   - default-jre-headless: refcoco 任务的 pycocoevalcap METEOR 评分需要 Java
+#   - curl: 下载 uv
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    ffmpeg \
+    libsm6 \
+    libxext6 \
+    poppler-utils \
+    default-jre-headless \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装 uv (CU 评测任务需要 uv 来运行 eval_cu.py)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && ln -s /root/.local/bin/uv /usr/local/bin/uv
+
+# CPU 版 PyTorch (评测客户端不需要 GPU)
+RUN pip install --no-cache-dir \
+    torch==2.5.1 torchvision==0.20.1 \
+    --index-url https://download.pytorch.org/whl/cpu
+
+# 从本地源码安装 lmms-eval
+# 使用 COPY 而非 git clone，确保本地修改（max_tokens 上限、system_prompt 支持等）打进镜像
+COPY . /home/ec2-user/benchmarks/lmms-eval
+RUN cd /home/ec2-user/benchmarks/lmms-eval \
+    && pip install --no-cache-dir -e .
+
+# ======================== 各任务额外依赖 ========================
+# dynamath_reasoning: math_verify -> latex2sympy2_extended
+# mathvision_testmini: eval_utils.py -> latex2sympy2
+# mmbench_en_dev: pandas + openpyxl (ExcelWriter)
+# mathvista_testmini, omnidocbench: python-Levenshtein
+# ifeval: langdetect, immutabledict, nltk
+# hallusion_bench_image, mathvision_testmini: tqdm
+# mmlongbench_doc: pdf2image (+ poppler-utils 系统包已装)
+# refcoco: pycocoevalcap, pycocotools (+ Java 已装)
+# 框架核心 metrics.py: sacrebleu
+RUN pip install --no-cache-dir \
+    math_verify \
+    latex2sympy2_extended \
+    latex2sympy2 \
+    pandas \
+    openpyxl \
+    python-Levenshtein \
+    langdetect \
+    immutabledict \
+    nltk \
+    tqdm \
+    pdf2image \
+    pycocoevalcap \
+    pycocotools \
+    sacrebleu
+
+# 下载 NLTK 数据 (ifeval 任务需要 punkt tokenizer)
+RUN python -c "import nltk; nltk.download('punkt'); nltk.download('punkt_tab')"
+
+WORKDIR /opt/lmms-eval
+ENTRYPOINT ["python", "-m", "lmms_eval"]
