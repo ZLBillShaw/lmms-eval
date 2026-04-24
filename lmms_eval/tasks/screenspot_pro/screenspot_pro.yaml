@@ -7,7 +7,7 @@ doc_to_text: !function utils.screenspot_pro_doc_to_text
 doc_to_messages: !function utils.screenspot_pro_doc_to_messages
 doc_to_target: instruction
 generation_kwargs:
-  max_new_tokens: 128
+  max_new_tokens: 4096
   temperature: 0
   do_sample: false
 process_results: !function utils.screenspot_pro_process_results

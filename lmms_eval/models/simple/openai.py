@@ -1,8 +1,9 @@
 import base64
 import os
+import re
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from typing import List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import unquote
 
 import numpy as np
@@ -63,6 +64,29 @@ def _normalize_openai_message_content(content) -> str:
     return str(content)
 
 
+def _strip_think_content(text: str) -> str:
+    """剥离 Qwen3 / DeepSeek-R1 等模型输出中的 thinking 内容。
+
+    支持两种情形：
+      1. 完整的 <think>...</think> 包裹 —— 直接移除这一整段。
+      2. 仅见结束标签 </think>（开头的 <think> 被 chat template 注入并 tokenize 掉了）
+         —— 取 </think> 之后的内容作为最终答案。
+    若输出被截断、从未出现 </think>，则原样返回（保底不丢字）。
+    """
+    if not text:
+        return text
+    # 情形 1：成对出现
+    stripped = re.sub(r"<think\b[^>]*>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
+    if stripped != text.strip():
+        return stripped
+    # 情形 2：只有 </think>
+    lower = text.lower()
+    end_idx = lower.rfind("</think>")
+    if end_idx != -1:
+        return text[end_idx + len("</think>") :].strip()
+    return text
+
+
 @register_model("openai")
 class OpenAICompatible(lmms):
     def __init__(
@@ -92,6 +116,8 @@ class OpenAICompatible(lmms):
         prefix_hash_chars: int = 256,
         system_prompt: Optional[str] = None,
         chat_template_kwargs: Optional[str] = None,
+        enable_thinking: Optional[str] = None,
+        extra_body: Optional[str] = None,
         **kwargs,
     ) -> None:
         """
@@ -134,7 +160,7 @@ class OpenAICompatible(lmms):
 
         # 支持 chat_template_kwargs，用于如 Qwen3.5 的 enable_thinking 控制
         # 可以传入 JSON 字符串（如 '{"enable_thinking": false}'）或逗号分隔的 key=value
-        self.chat_template_kwargs = None
+        self.chat_template_kwargs: Optional[Dict[str, Any]] = None
         if chat_template_kwargs is not None:
             import json
 
@@ -143,6 +169,37 @@ class OpenAICompatible(lmms):
             except (json.JSONDecodeError, TypeError):
                 eval_logger.warning(f"Failed to parse chat_template_kwargs as JSON: {chat_template_kwargs}")
                 self.chat_template_kwargs = None
+
+        # 便捷开关：--model_args 里直接传 enable_thinking=false 即可关闭 Qwen3 系列模型的思考链。
+        # 等价于 chat_template_kwargs={"enable_thinking": false}，且会覆盖/合入上面的 chat_template_kwargs。
+        if enable_thinking is not None:
+            thinking_flag = parse_bool(enable_thinking)
+            if self.chat_template_kwargs is None:
+                self.chat_template_kwargs = {}
+            self.chat_template_kwargs["enable_thinking"] = thinking_flag
+
+        # 通用 extra_body：允许用户透传任意 vLLM / OpenAI 兼容后端的扩展字段，
+        # 例如 Qwen3 官方示例里的 top_k、chat_template_kwargs 等（OpenAI 协议不认识的字段都可放这里）。
+        # 输入为 JSON 字符串，例如：extra_body='{"top_k": 20, "chat_template_kwargs": {"enable_thinking": false}}'
+        self.extra_body: Dict[str, Any] = {}
+        if extra_body is not None:
+            import json
+
+            try:
+                parsed = json.loads(extra_body)
+                if isinstance(parsed, dict):
+                    self.extra_body = parsed
+                else:
+                    eval_logger.warning(f"extra_body must be a JSON object, got: {type(parsed).__name__}; ignored.")
+            except (json.JSONDecodeError, TypeError):
+                eval_logger.warning(f"Failed to parse extra_body as JSON: {extra_body}; ignored.")
+
+        # 如果同时通过 chat_template_kwargs / enable_thinking 和 extra_body 给了值，
+        # 合并策略：extra_body 作为基础，chat_template_kwargs 这个具体字段以快捷入参为准（深度合并一层）。
+        if self.chat_template_kwargs:
+            merged = dict(self.extra_body.get("chat_template_kwargs") or {})
+            merged.update(self.chat_template_kwargs)
+            self.extra_body["chat_template_kwargs"] = merged
         # In China mainland, people usually use a VPN client to access international web
         # sites such as Google. Such a client usually configures macOS proxy server
         # settings. openai-python uses a httpx.Client with trust_env set to True. Such a
@@ -360,6 +417,10 @@ class OpenAICompatible(lmms):
                 try:
                     response = self.client.chat.completions.create(**payload)
                     response_text = _normalize_openai_message_content(response.choices[0].message.content)
+                    # 兼容 Qwen3 / DeepSeek-R1 等 reasoning 模型：
+                    # 1) 若服务端将 thinking 放到 message.reasoning_content，content 已是干净答案，无需处理；
+                    # 2) 若 thinking 混在 content 中（<think>...</think> 或仅有 </think>），在此剥离。
+                    response_text = _strip_think_content(response_text)
                     token_counts = None
                     if hasattr(response, "usage") and response.usage:
                         log_usage(
@@ -474,12 +535,11 @@ class OpenAICompatible(lmms):
                 "temperature": temperature,
             }
 
-            # 如果配置了 chat_template_kwargs（如 Qwen3.5 的 enable_thinking），
-            # 通过 extra_body 传递给 vLLM 服务端
-            if self.chat_template_kwargs:
-                payload["extra_body"] = {
-                    "chat_template_kwargs": self.chat_template_kwargs,
-                }
+            # 将 extra_body（含 chat_template_kwargs、top_k 等 vLLM 扩展字段）透传给服务端。
+            # 参考 Qwen3 官方示例，关闭思考链的正确姿势是：
+            #   extra_body={"chat_template_kwargs": {"enable_thinking": False}}
+            if self.extra_body:
+                payload["extra_body"] = dict(self.extra_body)
             payload["messages"][-1]["content"].append({"type": "text", "text": context})
             for img in imgs:
                 if isinstance(img, dict) and "audio_b64" in img:
